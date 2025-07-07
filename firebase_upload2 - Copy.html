@@ -20,7 +20,8 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
         import { getAuth, isSignInWithEmailLink, sendSignInLinkToEmail, signInWithEmailLink, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
-        import { getFirestore, collection, doc, getDoc, addDoc, FieldValue } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+        // Corrected import: import { getFirestore, collection, doc, getDoc, addDoc, FieldValue, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+        import { getFirestore, collection, doc, getDoc, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js"; // Import serverTimestamp directly
         import { getStorage, ref, uploadBytes } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-storage.js"; // Removed getDownloadURL
 
         // --- Firebase Configuration ---
@@ -39,7 +40,7 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
         const storage = getStorage(app);
-        const serverTimestamp = FieldValue.serverTimestamp; // Correct way to get serverTimestamp from Firestore
+        // Removed: const serverTimestamp = FieldValue.serverTimestamp; // Correct way to get serverTimestamp from Firestore
 
         // --- DOM Element References ---
         const emailView = document.getElementById('emailView');
@@ -139,12 +140,15 @@
                     crc32: crc32,
                     fileSize: file.size,
                     contentType: file.type,
-                    createdAt: serverTimestamp() // Using the imported serverTimestamp
+                    createdAt: serverTimestamp() // Now correctly called as a function
                 });
 
                 updateStatus(`Success! File uploaded and logged.`, 'success');
                 uploadForm.reset();
-                fileInfoDiv.classList.add('hidden');
+                // Ensure fileInfoDiv is valid before trying to manipulate its classList
+                if (fileInfoDiv) { 
+                    fileInfoDiv.classList.add('hidden');
+                }
                 setTimeout(() => {
                     signOut(auth).then(() => location.reload()); // Sign out and reload after success
                 }, 3000);
@@ -200,24 +204,28 @@
                     }
                 }
             });
+
+            // --- UI and Helper Functions (moved inside mainApp for DOM readiness) ---
+            fileInput.addEventListener('change', () => {
+                if (fileInput.files.length > 0) {
+                    const file = fileInput.files[0];
+                    fileInfoName.textContent = file.name;
+                    fileInfoSize.textContent = `${(file.size / 1024).toFixed(2)} KB`;
+                    fileInfoDiv.classList.remove('hidden');
+                } else {
+                    // Ensure fileInfoDiv is valid before trying to manipulate its classList
+                    if (fileInfoDiv) { 
+                        fileInfoDiv.classList.add('hidden');
+                    }
+                }
+            });
         };
 
         // Run the main app logic after the DOM is loaded.
         document.addEventListener('DOMContentLoaded', mainApp);
 
 
-        // --- UI and Helper Functions ---
-        fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) {
-                const file = fileInput.files[0];
-                fileInfoName.textContent = file.name;
-                fileInfoSize.textContent = `${(file.size / 1024).toFixed(2)} KB`;
-                fileInfoDiv.classList.remove('hidden');
-            } else {
-                fileInfoDiv.classList.add('hidden');
-            }
-        });
-
+        // --- Other UI and Helper Functions (remain outside mainApp as they don't directly manipulate DOM on load) ---
         function setLoading(isLoading, btnId, message) {
             const btn = document.getElementById(btnId);
             if (btn) {
