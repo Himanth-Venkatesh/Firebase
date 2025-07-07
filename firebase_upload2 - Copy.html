@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Document Submission</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+    
+    <!-- CRC32 Library -->
+    <script src="https://cdn.jsdelivr.net/npm/crc-32/crc32.min.js"></script>
+
+    <!-- Firebase SDKs (Modular v11.10.0) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+        import { getAuth, isSignInWithEmailLink, sendSignInLinkToEmail, signInWithEmailLink, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+        import { getFirestore, collection, doc, getDoc, addDoc, FieldValue } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-storage.js"; // Removed getDownloadURL
+
+        // --- Firebase Configuration ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyDvH2NSC8s9tvdlPFcP9mhM2WMj9u0aYK4",
+            authDomain: "submission-project-d9183.firebaseapp.com",
+            projectId: "submission-project-d9183",
+            storageBucket: "submission-project-d9183.firebasestorage.app",
+            messagingSenderId: "413241836937",
+            appId: "1:413241836937:web:b36682f6919ac460124d58",
+            measurementId: "G-LQPSKZHYLC"
+        };
+
+        // --- Initialize Firebase ---
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const storage = getStorage(app);
+        const serverTimestamp = FieldValue.serverTimestamp; // Correct way to get serverTimestamp from Firestore
+
+        // --- DOM Element References ---
+        const emailView = document.getElementById('emailView');
+        const linkSentView = document.getElementById('linkSentView');
+        const uploadView = document.getElementById('uploadView');
+        const emailForm = document.getElementById('emailForm');
+        const uploadForm = document.getElementById('uploadForm');
+        const statusDiv = document.getElementById('status');
+        const emailInput = document.getElementById('email');
+        const fileInput = document.getElementById('file');
+        const fileInfoDiv = document.getElementById('file-info');
+        const fileInfoName = document.getElementById('file-info-name');
+        const fileInfoSize = document.getElementById('file-info-size');
+
+        // --- App Logic ---
+        const actionCodeSettings = {
+            url: window.location.href, // URL to redirect back to
+            handleCodeInApp: true,
+        };
+
+        // Step 1: User enters email
+        emailForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = emailInput.value;
+            if (!email) {
+                updateStatus('Please enter a valid email address.', 'error');
+                return;
+            }
+
+            setLoading(true, 'sendLinkBtn', 'Verifying...');
+            try {
+                // Check if email is authorized
+                const userDocRef = doc(collection(db, 'authorizedUsers'), email);
+                const userDoc = await getDoc(userDocRef);
+
+                if (!userDoc.exists) {
+                    throw new Error('This email address is not authorized for submission.');
+                }
+
+                await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+                window.localStorage.setItem('emailForSignIn', email);
+                
+                updateStatus('Sign-in link sent successfully.', 'success');
+                document.getElementById('emailDisplay').textContent = email;
+                emailView.style.display = 'none';
+                linkSentView.style.display = 'block';
+
+            } catch (error) {
+                console.error("Error sending link:", error);
+                updateStatus(error.message, 'error');
+            } finally {
+                setLoading(false, 'sendLinkBtn', 'Send Sign-In Link');
+            }
+        });
+
+        // Step 3: User uploads file
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const user = auth.currentUser;
+            const file = fileInput.files[0];
+
+            if (!file || !user) {
+                updateStatus('You must be signed in and select a file to upload.', 'error');
+                return;
+            }
+
+            setLoading(true, 'submitBtn', 'Processing...');
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                const sha256 = await calculateSHA256(arrayBuffer);
+                const crc32 = calculateCRC32(arrayBuffer);
+
+                const uniqueFilename = `${Date.now()}-${file.name}`;
+                const storageRef = ref(storage, `uploads/${user.uid}/${uniqueFilename}`);
+                
+                // --- DEBUG LOGS ---
+                console.log("Attempting file upload...");
+                console.log("Authenticated User UID:", user.uid);
+                console.log("Target Storage Path:", storageRef.fullPath);
+                console.log("File Type:", file.type);
+                console.log("File Size:", file.size);
+                // --- END DEBUG LOGS ---
+
+                // Upload file to Cloud Storage
+                const uploadResult = await uploadBytes(storageRef, file);
+                // Removed getDownloadURL call as per security rules (allow read: if false)
+                // const downloadURL = await getDownloadURL(uploadResult.ref); 
+
+                // Add submission log to Firestore
+                await addDoc(collection(db, 'submissions'), {
+                    userId: user.uid,
+                    userEmail: user.email,
+                    originalFilename: file.name,
+                    storagePath: uploadResult.ref.fullPath,
+                    // Removed downloadURL from the log as it's not accessible client-side
+                    sha256: sha256,
+                    crc32: crc32,
+                    fileSize: file.size,
+                    contentType: file.type,
+                    createdAt: serverTimestamp() // Using the imported serverTimestamp
+                });
+
+                updateStatus(`Success! File uploaded and logged.`, 'success');
+                uploadForm.reset();
+                fileInfoDiv.classList.add('hidden');
+                setTimeout(() => {
+                    signOut(auth).then(() => location.reload()); // Sign out and reload after success
+                }, 3000);
+
+            } catch (error) {
+                console.error("Upload Error:", error);
+                let errorMessage = 'An error occurred during upload.';
+                if (error.code === 'storage/unauthorized') {
+                    errorMessage = 'Security error: You are not authorized to upload this file. Please check your Cloud Storage rules, file type, and size.';
+                } else if (error.code === 'permission-denied') {
+                    errorMessage = 'Firestore permission denied. Check your Firestore rules or the data being written.';
+                }
+                updateStatus(errorMessage, 'error');
+            } finally {
+                setLoading(false, 'submitBtn', 'Upload and Verify');
+            }
+        });
+        
+        // --- Central Authentication Handler ---
+        const mainApp = () => {
+            // First, handle the sign-in link case if the user is returning
+            if (isSignInWithEmailLink(auth, window.location.href)) {
+                let email = window.localStorage.getItem('emailForSignIn');
+                if (!email) {
+                    // Fallback if email is not in local storage (e.g., user opened link in different browser)
+                    email = window.prompt('Please provide your email for confirmation');
+                }
+                
+                signInWithEmailLink(auth, email, window.location.href)
+                    .then((result) => {
+                        window.localStorage.removeItem('emailForSignIn');
+                        // The onAuthStateChanged listener below will handle showing the correct view.
+                    })
+                    .catch((error) => {
+                        console.error("Sign-in error:", error);
+                        updateStatus('Failed to sign in. The link may be invalid or expired.', 'error');
+                    });
+            }
+
+            // This listener is the single source of truth for the UI
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    // User is signed in.
+                    emailView.style.display = 'none';
+                    linkSentView.style.display = 'none';
+                    uploadView.style.display = 'block';
+                } else {
+                    // User is signed out and not in the process of signing in via email link.
+                    if (!isSignInWithEmailLink(auth, window.location.href)) {
+                        uploadView.style.display = 'none';
+                        linkSentView.style.display = 'none';
+                        emailView.style.display = 'block';
+                    }
+                }
+            });
+        };
+
+        // Run the main app logic after the DOM is loaded.
+        document.addEventListener('DOMContentLoaded', mainApp);
+
+
+        // --- UI and Helper Functions ---
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                fileInfoName.textContent = file.name;
+                fileInfoSize.textContent = `${(file.size / 1024).toFixed(2)} KB`;
+                fileInfoDiv.classList.remove('hidden');
+            } else {
+                fileInfoDiv.classList.add('hidden');
+            }
+        });
+
+        function setLoading(isLoading, btnId, message) {
+            const btn = document.getElementById(btnId);
+            if (btn) {
+                btn.disabled = isLoading;
+                btn.innerHTML = isLoading ? `<div class="loader"></div>` : message;
+            }
+        }
+
+        function updateStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = type;
+        }
+
+        async function calculateSHA256(buffer) {
+            const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function calculateCRC32(buffer) {
+            const hash = CRC32.buf(new Uint8Array(buffer));
+            return (hash >>> 0).toString(16);
+        }
+    </script>
+    <style>
+        :root {
+            --dark-bg: #0A0A0A;
+            --primary-accent: #A3FF55;
+            --soft-white: #EAEAEA;
+            --border-color: rgba(255, 255, 255, 0.1);
+            --card-bg: #141414;
+        }
+        body {
+            background-color: var(--dark-bg);
+            color: var(--soft-white);
+            font-family: 'Inter', sans-serif;
+        }
+        .font-display {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            text-transform: uppercase;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px 32px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-family: 'Syne', sans-serif;
+            text-transform: uppercase;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        .btn-primary {
+            color: #0A0A0A;
+            background-color: var(--primary-accent);
+        }
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-3px) scale(1.05);
+        }
+        .btn:disabled {
+            background-color: #a0a0a0;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+        .form-input {
+            background-color: transparent;
+            border: 0;
+            border-bottom: 2px solid var(--border-color);
+            color: var(--soft-white);
+            padding: 0.75rem 0.25rem;
+            font-size: 1.125rem;
+            transition: border-color 0.3s;
+            width: 100%;
+        }
+        .form-input:focus {
+            outline: none;
+            box-shadow: none;
+            border-color: var(--primary-accent);
+        }
+        .file-input-wrapper {
+            padding: 3rem 2rem; 
+            border: 2px dashed var(--border-color);
+            border-radius: 12px; 
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s, background-color 0.3s;
+        }
+        .file-input-wrapper:hover {
+            border-color: var(--primary-accent);
+            background-color: rgba(163, 255, 85, 0.05);
+        }
+        #status.success { color: var(--primary-accent); }
+        #status.error { color: #ff5555; }
+        .loader {
+            border: 4px solid #333;
+            border-top: 4px solid var(--primary-accent);
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen p-4">
+
+<div class="bg-card-bg rounded-2xl shadow-2xl w-full max-w-lg mx-auto border border-border-color p-8 md:p-10">
+    
+    <!-- View 1: Email Entry -->
+    <div id="emailView">
+        <h1 class="font-display text-2xl md:text-3xl text-center text-white mb-2">Secure Submission</h1>
+        <p class="text-center text-gray-400 mb-8">Enter your authorized email to begin.</p>
+        <form id="emailForm">
+            <div class="mb-6">
+                <label for="email" class="block text-sm font-medium text-gray-400 mb-2">Email Address</label>
+                <input type="email" id="email" name="email" class="form-input" placeholder="you@example.com" required>
+            </div>
+            <button type="submit" id="sendLinkBtn" class="btn btn-primary w-full">Send Sign-In Link</button>
+        </form>
+    </div>
+
+    <!-- View 2: Link Sent Confirmation -->
+    <div id="linkSentView" style="display:none;">
+        <h1 class="font-display text-2xl md:text-3xl text-center text-white mb-2">Check Your Inbox</h1>
+        <p class="text-center text-gray-400">A secure sign-in link has been sent to <strong id="emailDisplay" class="text-soft-white"></strong>. Please click the link in that email to continue.</p>
+    </div>
+
+    <!-- View 3: File Upload (Authenticated View) -->
+    <div id="uploadView" style="display:none;">
+        <h1 class="font-display text-2xl md:text-3xl text-center text-white mb-2">Upload Your Document</h1>
+        <p class="text-center text-gray-400 mb-8">You are signed in. Please select your file.</p>
+        <form id="uploadForm">
+            <div class="mb-8"> 
+                <label for="file" class="file-input-wrapper block w-full">
+                    <span>Click to select a PDF document</span>
+                    <input type="file" id="file" name="file" accept=".pdf" required>
+                </label>
+                <div id="file-info" class="hidden mt-4 p-4 bg-gray-800/50 rounded-lg text-left">
+                    <div class="flex items-center justify-between">
+                        <p class="text-sm font-medium text-soft-white truncate pr-4" id="file-info-name"></p>
+                        <p class="text-xs font-mono text-gray-400 flex-shrink-0" id="file-info-size"></p>
+                    </div>
+                </div>
+            </div>
+            <button type="submit" id="submitBtn" class="btn btn-primary w-full">Upload and Verify</button>
+        </form>
+    </div>
+    
+    <!-- Status message area -->
+    <div id="status" class="text-center mt-6 min-h-[24px]"></div>
+</div>
+
+</body>
+</html>
